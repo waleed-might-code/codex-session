@@ -1,0 +1,13 @@
+.env
+.storage_key
+.venv/
+.claude/
+.cursor/
+__pycache__/
+*.pyc
+data.json
+data/*.csv
+!data/.gitkeep
+playwright-report/
+test-results/
+tmp/
