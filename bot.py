@@ -20,7 +20,8 @@ sys.path.insert(0, ROOT)
 import utils.discord_helpers as dh
 import storage.projects as proj_store
 import storage.sessions as sess_store
-import layers.claude_exec as claude_exec
+import storage.discord_jobs as discord_jobs_store
+import layers.codex_exec as claude_exec
 dh.init(os.getenv("DISCORD_BOT_TOKEN"))
 
 # ── Storage bootstrap ─────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ import commands.preview_cmd as preview_cmd
 import commands.server_cmd as server_cmd
 import commands.cloudflare_cmd as cloudflare_cmd
 import commands.github_cmd as github_cmd
+import commands.discord_cmd as discord_cmd
 import commands.deploy_cmd as deploy_cmd
 import commands.test_cmd as test_cmd
 import skills.make_live as make_live_skill
@@ -109,7 +111,7 @@ async def route(data: dict):
         elif command == "file":
             await files_cmd.handle_file(sub, sub_opts, token, channel_id)
 
-        elif command == "claude":
+        elif command in ("claude", "codex"):
             await claude_cmd.handle(sub, sub_opts, token, channel_id, user_id, fu, fu_chunks)
 
         elif command == "session":
@@ -126,6 +128,9 @@ async def route(data: dict):
 
         elif command == "github":
             await github_cmd.handle(sub, sub_opts, token)
+
+        elif command == "discord":
+            await discord_cmd.handle(sub, sub_opts, token, channel_id, user_id)
 
         elif command == "deploy":
             await deploy_cmd.handle(sub, sub_opts, token, channel_id)
@@ -144,7 +149,18 @@ async def route(data: dict):
         import traceback
         tb = traceback.format_exc()
         print(f"[!] Handler error for /{command}: {e}\n{tb}")
-        await dh.followup(token, f"❌ Internal error: `{str(e)[:200]}`")
+        message = str(e)[:200]
+        friendly_prefixes = (
+            "Codex CLI is not authenticated",
+            "Codex CLI could not reach",
+            "Active project path does not exist",
+            "Dev server crashed on startup",
+            "Failed to install Python requirements",
+        )
+        if any(message.startswith(prefix) for prefix in friendly_prefixes):
+            await dh.followup(token, f"❌ {message}")
+        else:
+            await dh.followup(token, f"❌ Internal error: `{message}`")
 
 
 # ── Auto-bulk: parse numbered app specs from text ────────────────────────────
@@ -218,7 +234,7 @@ def _parse_numbered_specs(text: str) -> list[dict] | None:
 
 
 async def _run_bulk_from_specs(channel_id: str, user_id: str, proj: dict, specs: list[dict]):
-    """Create ALL threads upfront, then run Claude in them 3 at a time.
+    """Create ALL threads upfront, then run Codex in them 3 at a time.
     If running from inside a thread (Discord doesn't support nested threads),
     runs all apps inline in the same channel with bold headers instead.
     """
@@ -257,13 +273,13 @@ async def _run_bulk_from_specs(channel_id: str, user_id: str, proj: dict, specs:
             print(f"[bulk] FAILED standalone thread for {thread_name}: {result}")
         await asyncio.sleep(1.0)
 
-    nav_lines = [f"✅ **{len(thread_map)}/{total} threads created.** Claude is starting work...\n"]
+    nav_lines = [f"✅ **{len(thread_map)}/{total} threads created.** Codex is starting work...\n"]
     for i, spec in enumerate(specs):
         if thread_map.get(i):
             nav_lines.append(f"<#{thread_map[i]}>")
     await dh.send_message(channel_id, "\n".join(nav_lines))
 
-    # ── Phase 2: Run Claude in each destination ───────────────────────────────
+    # ── Phase 2: Run Codex in each destination ────────────────────────────────
     completed = 0
     failed = 0
 
@@ -312,7 +328,7 @@ async def _run_bulk_from_specs(channel_id: str, user_id: str, proj: dict, specs:
         await dh.send_message(dest,
             f"🤖 **Working on: {spec['name']}**\nSession: `{thread_sess['id']}`"
         )
-        print(f"[bulk] starting Claude for #{spec['index']} {spec['name']}")
+        print(f"[bulk] starting Codex for #{spec['index']} {spec['name']}")
 
         claude_exec.register_bulk_session(
             bulk_run_id=bulk_run_id,
@@ -425,6 +441,12 @@ async def handle_message(data: dict):
     # Quick "continue" shorthand for plain messages
     if content.lower() in ("continue", "c", "go", "keep going"):
         sess = sess_store.get_active_for_channel(channel_id)
+        if not sess:
+            proj = proj_store.get_by_channel(channel_id)
+            if proj:
+                sess = sess_store.get_active_root_for_project(proj["name"])
+                if sess:
+                    sess_store.attach_channel(sess["id"], channel_id)
         if sess:
             proj = proj_store.get_by_channel(channel_id)
             if not proj:
@@ -443,15 +465,21 @@ async def handle_message(data: dict):
                 except claude_exec.TurnLimitReached as e:
                     if e.partial_result:
                         await dh.send_message_chunks(channel_id, e.partial_result)
-                    await dh.send_message(channel_id, "⚠️ Step limit reached again. Say `continue` or use `/claude auto`.")
+                    await dh.send_message(channel_id, "⚠️ Step limit reached again. Say `continue` or use `/codex auto`.")
                 except Exception as e:
                     await dh.send_message(channel_id, f"❌ Error: {str(e)[:200]}")
                 return
         # Fall through to normal handling if no session
 
-    # Interruption: "stop" or "cancel" cancels the running Claude task + auto-continue + bulk
+    # Interruption: "stop" or "cancel" cancels the running Codex task + auto-continue + bulk
     if content.lower() in ("stop", "cancel", "s"):
         sess = sess_store.get_active_for_channel(channel_id)
+        if not sess:
+            proj = proj_store.get_by_channel(channel_id)
+            if proj:
+                sess = sess_store.get_active_root_for_project(proj["name"])
+                if sess:
+                    sess_store.attach_channel(sess["id"], channel_id)
         if sess:
             claude_exec.cancel_session(sess["id"])
             try:
@@ -466,7 +494,7 @@ async def handle_message(data: dict):
     # Only respond if a project is active for this channel
     proj = proj_store.get_by_channel(channel_id)
     if not proj:
-        # Check if this is a thread with an active session (from /claude thread or /claude bulk)
+        # Check if this is a thread with an active session (from /codex thread or /codex bulk)
         thread_sess = sess_store.get_active_for_channel(channel_id)
         if thread_sess and thread_sess.get("project_name"):
             proj = proj_store.get(thread_sess["project_name"])
@@ -518,7 +546,7 @@ async def handle_message(data: dict):
     if not content and not image_data:
         return
 
-    # ── Casual message detection — don't run Claude agent on greetings/chitchat ──
+    # ── Casual message detection — don't run Codex on greetings/chitchat ──────
     if content and not image_data and not text_file_content and len(content) < 60:
         _casual = {
             "hello", "hi", "hey", "sup", "yo", "hiya", "howdy",
@@ -531,7 +559,7 @@ async def handle_message(data: dict):
         _stripped = content.lower().strip().rstrip("!?.").strip()
         if _stripped in _casual or (_stripped.startswith(("hi ", "hey ", "hello ")) and len(_stripped) < 30):
             await dh.send_message(channel_id,
-                f"👋 Hey! I'm ready to work on **{proj['name']}**. What would you like me to build or fix?"
+                f"👋 Hey! I'm ready to work on **{proj['name']}** with Codex. What would you like me to build or fix?"
             )
             return
 
@@ -566,25 +594,17 @@ async def handle_message(data: dict):
     await dh.send_typing(channel_id)
 
     sess = sess_store.get_active_for_channel(channel_id)
+    if sess and sess.get("project_name") != proj["name"]:
+        sess = None
     if not sess:
-        sess = sess_store.create(proj["name"], channel_id, user_id)
-    # Auto-close stale sessions older than 30 minutes to prevent history bleed
-    else:
-        import time as _time
-        updated = sess.get("updated_at") or sess.get("created_at") or ""
-        try:
-            import datetime
-            age = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(updated.replace("Z",""))).total_seconds()
-            if age > 1800:  # 30 min
-                sess_store.close(sess["id"])
-                sess = sess_store.create(proj["name"], channel_id, user_id)
-                print(f"[session] auto-closed stale session, new: {sess['id']}")
-        except Exception:
-            pass
-
+        sess = sess_store.get_active_root_for_project(proj["name"])
+        if sess:
+            sess_store.attach_channel(sess["id"], channel_id)
+        else:
+            sess = sess_store.create(proj["name"], channel_id, user_id)
     progress_queue = asyncio.Queue()
     def on_progress(msg: str):
-        print(f"[claude] {msg}")
+        print(f"[codex] {msg}")
         asyncio.get_event_loop().call_soon_threadsafe(progress_queue.put_nowait, msg)
 
     async def send_typing_loop():
@@ -614,14 +634,15 @@ async def handle_message(data: dict):
             await dh.send_message_chunks(channel_id, e.partial_result)
         await dh.send_message(channel_id,
             "⚠️ **Step limit reached (20 steps).**\n"
-            "Say `continue` to keep going, or use `/claude limit` to increase the limit."
+            "Say `continue` to keep going, or use `/codex limit` to increase the limit."
         )
         return
     except Exception as e:
         import traceback
         print(f"[!] handle_message error: {e}\n{traceback.format_exc()}")
         typing_task.cancel()
-        await dh.send_message(channel_id, f"❌ Error: `{str(e)[:200]}`")
+        message = str(e)[:200]
+        await dh.send_message(channel_id, f"❌ Error: {message}")
         return
     finally:
         typing_task.cancel()
@@ -680,8 +701,26 @@ async def gateway_loop():
                     asyncio.create_task(handle_message(d))
 
 
+async def discord_jobs_loop():
+    while True:
+        try:
+            for job in discord_jobs_store.list_due(limit=10):
+                target = job.get("thread_id") or job.get("channel_id")
+                try:
+                    result = await dh.send_message(target, job["content"])
+                    discord_jobs_store.mark_sent(job["id"], result.get("id", ""))
+                    print(f"[discord-jobs] sent job {job['id']} to {target}")
+                except Exception as e:
+                    discord_jobs_store.mark_failed(job["id"])
+                    print(f"[discord-jobs] failed job {job['id']}: {e}")
+        except Exception as e:
+            print(f"[discord-jobs] loop error: {e}")
+        await asyncio.sleep(15)
+
+
 async def main():
     print("[*] Starting ProjectExo...")
+    asyncio.create_task(discord_jobs_loop())
     while True:
         try:
             await gateway_loop()

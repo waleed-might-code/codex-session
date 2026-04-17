@@ -49,26 +49,52 @@ COMMANDS = [
         sub("tail", "View last N lines",  [s("path","File path",True), i("lines","Number of lines (default: 20)")]),
     ]},
 
-    # ── /claude ───────────────────────────────────────────────────────────────
-    {"name": "claude", "description": "Claude Code AI engine", "options": [
-        sub("ask",      "Send a prompt to Claude",         [s("prompt","Your task or question",True)]),
-        sub("continue", "Continue previous Claude session", [s("prompt","Follow-up instruction")]),
+    # ── /codex ────────────────────────────────────────────────────────────────
+    {"name": "codex", "description": "Codex coding agent", "options": [
+        sub("ask",      "Send a prompt to Codex",          [s("prompt","Your task or question",True)]),
+        sub("continue", "Continue previous Codex session", [s("prompt","Follow-up instruction")]),
         sub("auto",     "Auto-continue until task is done", [s("prompt","Task or follow-up"), i("rounds","Max auto-continue rounds (default: 5)")]),
         sub("thread",   "Run a task in a new Discord thread", [s("prompt","Task to run in thread",True), s("name","Thread name (optional)")]),
         sub("bulk",     "Run same prompt in N parallel threads", [s("prompt","Task to run in each thread",True), i("count","Number of threads (1-10, default: 3)"), s("name","Thread name prefix (default: Task)")]),
-        sub("diff",     "Show git diff of Claude's changes"),
+        sub("diff",     "Show git diff of Codex's changes"),
         sub("status",   "Show session and git status"),
-        sub("plan",     "Ask Claude to plan (no edits)",   [s("prompt","What to plan",True)]),
-        sub("fix",      "Ask Claude to find and fix an issue", [s("prompt","Describe the issue",True)]),
-        sub("stop",     "Close current Claude session"),
+        sub("plan",     "Ask Codex to plan (no edits)",    [s("prompt","What to plan",True)]),
+        sub("fix",      "Ask Codex to find and fix an issue", [s("prompt","Describe the issue",True)]),
+        sub("stop",     "Close current Codex session"),
+        sub("limit",    "Set max steps for this session", [i("steps","Max steps (default: 40)")]),
+    ]},
+
+    # ── /claude (legacy alias) ───────────────────────────────────────────────
+    {"name": "claude", "description": "Legacy alias for Codex", "options": [
+        sub("ask",      "Send a prompt to Codex",          [s("prompt","Your task or question",True)]),
+        sub("continue", "Continue previous Codex session", [s("prompt","Follow-up instruction")]),
+        sub("auto",     "Auto-continue until task is done", [s("prompt","Task or follow-up"), i("rounds","Max auto-continue rounds (default: 5)")]),
+        sub("thread",   "Run a task in a new Discord thread", [s("prompt","Task to run in thread",True), s("name","Thread name (optional)")]),
+        sub("bulk",     "Run same prompt in N parallel threads", [s("prompt","Task to run in each thread",True), i("count","Number of threads (1-10, default: 3)"), s("name","Thread name prefix (default: Task)")]),
+        sub("diff",     "Show git diff of Codex's changes"),
+        sub("status",   "Show session and git status"),
+        sub("plan",     "Ask Codex to plan (no edits)",    [s("prompt","What to plan",True)]),
+        sub("fix",      "Ask Codex to find and fix an issue", [s("prompt","Describe the issue",True)]),
+        sub("stop",     "Close current Codex session"),
         sub("limit",    "Set max steps for this session", [i("steps","Max steps (default: 40)")]),
     ]},
 
     # ── /session ──────────────────────────────────────────────────────────────
-    {"name": "session", "description": "Manage Claude sessions", "options": [
+    {"name": "session", "description": "Manage Codex sessions", "options": [
         sub("list",   "List active sessions"),
+        sub("current","Show current channel session"),
+        sub("history","Show stored transcript history", [s("id","Session ID"), s("project","Project name"), i("limit","Max messages (default: 20)")]),
         sub("resume", "Resume a closed session", [s("id","Session ID",True)]),
         sub("close",  "Close a session",         [s("id","Session ID")]),
+    ]},
+
+    # ── /discord ──────────────────────────────────────────────────────────────
+    {"name": "discord", "description": "Native Discord actions for messages, scheduling, and threads", "options": [
+        sub("send",     "Send a Discord message", [s("message","Message content",True), s("channel","Target channel or thread id")]),
+        sub("schedule", "Schedule a Discord message", [s("message","Message content",True), i("minutes","Delay in minutes"), s("at","UTC timestamp like 2026-04-18T18:00:00Z"), s("channel","Target channel or thread id")]),
+        sub("jobs",     "List scheduled Discord jobs", [s("status","pending, sent, failed, cancelled")]),
+        sub("cancel",   "Cancel a scheduled Discord job", [s("id","Job id",True)]),
+        sub("thread",   "Create a standalone Discord thread", [s("name","Thread name",True), s("message","Optional starter message"), s("channel","Target channel id")]),
     ]},
 
     # ── /preview ──────────────────────────────────────────────────────────────
@@ -97,14 +123,14 @@ COMMANDS = [
         sub("connect",  "Connect Cloudflare account",         [s("token","Cloudflare API token",True)]),
         sub("domains",  "List zones/domains"),
         sub("tunnel",   "Create or reuse tunnel for server",  [s("server","Server alias")]),
-        sub("hostname", "Attach public hostname to tunnel",   [s("subdomain","Subdomain (e.g. api)",True), s("zone","Zone name or ID",True), s("server","Server alias")]),
+        sub("hostname", "Attach public hostname to tunnel",   [s("subdomain","Subdomain (e.g. api)",True), s("zone","Zone name or ID",True), s("server","Server alias"), s("service","Service name on the server"), i("port","Override port")]),
         sub("links",    "Show all active public links"),
     ]},
 
     # ── /deploy ───────────────────────────────────────────────────────────────
     {"name": "deploy", "description": "Deploy projects to servers", "options": [
-        sub("api",      "Deploy backend API", [s("service","Service name"), s("repo","Git repo URL"), s("branch","Branch (default: main)"), s("start_cmd","Override start command"), s("server","Server alias")]),
-        sub("web",      "Deploy frontend to Cloudflare Pages", [s("branch","Branch (default: main)")]),
+        sub("api",      "Deploy backend API", [s("project","Project name override"), s("service","Service name"), s("repo","Git repo URL"), s("branch","Branch (default: main)"), s("start_cmd","Override start command"), s("server","Server alias")]),
+        sub("web",      "Deploy frontend to Cloudflare Pages", [s("project","Project name override"), s("target","pages or workers (default: pages)"), s("branch","Branch (default: main)")]),
         sub("full",     "Full-stack deploy",  [s("server","Server alias"), s("frontend_target","pages or workers (default: pages)")]),
         sub("update",   "Update a deployed service (git pull + deps + restart)", [s("service","Service name",True), s("branch","Branch (default: main)"), s("start_cmd","Override start command"), s("server","Server alias")]),
         sub("health",   "Check detailed health of a deployed service", [s("service","Service name",True), s("server","Server alias")]),
@@ -116,7 +142,7 @@ COMMANDS = [
     {"name": "test", "description": "Visual testing: screenshots with console, test flows, and auto test-fix loop", "options": [
         sub("screenshot", "Screenshot with browser console capture", [s("url","URL to capture")]),
         sub("console",    "Show captured browser console logs"),
-        sub("run",        "Auto test-fix loop: screenshot → Claude eval → fix → repeat", [s("description","What the app does and what to test",True), s("url","URL to test"), i("iterations","Max fix iterations (default: 3)")]),
+        sub("run",        "Auto test-fix loop: screenshot → Codex eval → fix → repeat", [s("description","What the app does and what to test",True), s("url","URL to test"), i("iterations","Max fix iterations (default: 3)")]),
         sub("flow",       "Run a sequence of browser test steps (JSON)", [s("steps","JSON array of test steps",True), s("url","URL to test"), s("record","Record video: true/false (default: true)")]),
         sub("interact",   "Single browser action (click, fill, type, press, scroll)", [s("action","Action: click, fill, type, press, scroll, upload, evaluate_js",True), s("selector","CSS selector"), s("value","Value for fill/type, key for press, pixels for scroll")]),
     ]},
@@ -132,7 +158,7 @@ COMMANDS = [
     ]},
 
     # ── /make-live ────────────────────────────────────────────────────────────
-    {"name": "make-live", "description": "One-command full-stack release: Claude → preview → deploy → tunnel → go live", "options": [
+    {"name": "make-live", "description": "One-command full-stack release: Codex → preview → deploy → tunnel → go live", "options": [
         s("notes", "Optional release notes or instructions"),
     ]},
 ]

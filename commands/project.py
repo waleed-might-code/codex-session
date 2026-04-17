@@ -54,17 +54,21 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
         # Close any active session that belongs to a different project
         sess = sess_store.get_active_for_channel(channel_id)
         if sess and sess.get("project_name") != name:
-            import layers.claude_exec as claude_exec
+            import layers.codex_exec as claude_exec
             claude_exec.close_session_shell(sess["id"])
             sess_store.close(sess["id"])
             sess = None
-        if not sess:
-            sess = sess_store.create(name, channel_id, user_id)
+        if not sess or sess.get("project_name") != name:
+            sess = sess_store.get_active_root_for_project(name)
+            if sess:
+                sess_store.attach_channel(sess["id"], channel_id)
+            else:
+                sess = sess_store.create(name, channel_id, user_id)
         await followup(token,
             f"✅ Active project: **{name}**\n"
             f"📁 `{proj['path']}`\n"
             f"🔑 Session: `{sess['id']}`\n"
-            f"💬 Just type in this channel to chat with Claude."
+            f"💬 Just type in this channel to chat with Codex."
         )
 
     elif sub == "info":
