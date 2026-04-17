@@ -54,7 +54,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
         # Close any active session that belongs to a different project
         sess = sess_store.get_active_for_channel(channel_id)
         if sess and sess.get("project_name") != name:
-            import layers.claude_exec as claude_exec
+            import layers.codex_exec as claude_exec
             claude_exec.close_session_shell(sess["id"])
             sess_store.close(sess["id"])
             sess = None
@@ -64,7 +64,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             f"✅ Active project: **{name}**\n"
             f"📁 `{proj['path']}`\n"
             f"🔑 Session: `{sess['id']}`\n"
-            f"💬 Just type in this channel to chat with Claude."
+            f"💬 Just type in this channel to chat with Codex."
         )
 
     elif sub == "info":

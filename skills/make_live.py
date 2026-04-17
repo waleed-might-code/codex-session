@@ -1,12 +1,12 @@
 """
 make-live skill: end-to-end flow
-Claude finalizes → preview → backend deploy → tunnel → frontend deploy → return URLs.
+Codex finalizes → preview → backend deploy → tunnel → frontend deploy → return URLs.
 """
 import asyncio
 import storage.projects as proj_store
 import storage.servers as srv_store
 import storage.cloudflare as cf_store
-import layers.claude_exec as claude_exec
+import layers.codex_exec as claude_exec
 import layers.ssh_layer as ssh
 import layers.browser_layer as browser
 import layers.cloudflare_layer as cf_layer
@@ -30,12 +30,12 @@ async def run(token: str, channel_id: str, user_id: str, notes: str = ""):
         f"_{notes or 'Full stack release'}_"
     ))
 
-    # ── Step 1: Claude finalizes ──────────────────────────────────────────────
+    # ── Step 1: Codex finalizes ───────────────────────────────────────────────
     sess = sess_store.get_active_for_channel(channel_id)
     if not sess:
         sess = sess_store.create(proj["name"], channel_id, user_id)
 
-    await followup(token, "**[1/6]** 🤖 Asking Claude to prepare code for production...")
+    await followup(token, "**[1/6]** 🤖 Asking Codex to prepare code for production...")
     finalize_prompt = (
         "Prepare this project for production deployment. "
         "Check for obvious errors, ensure imports are correct, and confirm the entry point is valid. "
@@ -45,7 +45,7 @@ async def run(token: str, channel_id: str, user_id: str, notes: str = ""):
     claude_summary = await claude_exec.run(
         session_id=sess["id"], prompt=finalize_prompt, project_path=proj["path"]
     )
-    await followup(token, f"**Claude:** {claude_summary[:1000]}")
+    await followup(token, f"**Codex:** {claude_summary[:1000]}")
 
     # ── Step 2: Preview screenshot ────────────────────────────────────────────
     await followup(token, "**[2/6]** 📸 Taking preview screenshot...")

@@ -1,35 +1,30 @@
 """
-Visual testing loop: automated test → screenshot → Claude vision eval → fix → repeat.
-Runs a browser test flow, sends screenshots to multimodal Claude for evaluation,
+Visual testing loop: automated test → screenshot → Codex vision eval → fix → repeat.
+Runs a browser test flow, sends screenshots to Codex for evaluation,
 and iterates fixes until the app looks correct or max iterations are reached.
 """
 import asyncio
-import base64
 import io
-import os
 import json
 from typing import Callable, Optional
 
-import anthropic
-
 import layers.browser_layer as browser
-import layers.claude_exec as claude_exec
+import layers.codex_exec as claude_exec
 import storage.sessions as sess_store
 from utils.discord_helpers import send_image_to_channel, send_message
 
-MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250514")
 MAX_ITERATIONS = 5
 
 
 async def _evaluate_screenshot(
-    client: anthropic.Anthropic,
     image_data: bytes,
     console_logs: str,
+    project_path: str,
     app_description: str,
     test_description: str,
     iteration: int,
 ) -> dict:
-    """Send screenshot + console logs to Claude vision for evaluation."""
+    """Send screenshot + console logs to Codex for evaluation."""
 
     try:
         from PIL import Image
@@ -41,8 +36,6 @@ async def _evaluate_screenshot(
     except Exception:
         pass
 
-    b64 = base64.b64encode(image_data).decode()
-
     prompt_parts = [
         f"You are evaluating a web application (iteration {iteration}/{MAX_ITERATIONS}).",
         f"\nApp description: {app_description}",
@@ -52,7 +45,7 @@ async def _evaluate_screenshot(
         prompt_parts.append(f"\nBrowser console output:\n```\n{console_logs[:2000]}\n```")
 
     prompt_parts.append(
-        "\nAnalyze this screenshot carefully. Respond in JSON format:\n"
+        "\nAnalyze this screenshot carefully. Respond in JSON format only:\n"
         "{\n"
         '  "status": "pass" or "fail",\n'
         '  "score": 1-10 (visual quality and correctness),\n'
@@ -62,30 +55,15 @@ async def _evaluate_screenshot(
         "}"
     )
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
-            {"type": "text", "text": "\n".join(prompt_parts)},
-        ],
-    }]
-
-    def _call():
-        return client.messages.create(
-            model=MODEL, max_tokens=1500, messages=messages,
-            system="You are a QA engineer evaluating web app screenshots. Be specific about issues. Respond ONLY with valid JSON.",
-        )
-
     try:
-        resp = await asyncio.get_event_loop().run_in_executor(None, _call)
-        text = resp.content[0].text.strip()
-        # Extract JSON from response (handle markdown code blocks)
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        return json.loads(text)
+        text, _ = await claude_exec.run_once(
+            prompt="\n".join(prompt_parts),
+            project_path=project_path,
+            image_data=image_data,
+            image_media_type="image/png",
+            sandbox="read-only",
+        )
+        return claude_exec.extract_json(text)
     except (json.JSONDecodeError, Exception) as e:
         return {
             "status": "fail",
@@ -112,19 +90,13 @@ async def run_test_loop(
     1. Start dev server + open app
     2. Run test steps (if any)
     3. Screenshot + capture console
-    4. Send to Claude vision for evaluation
-    5. If issues found → ask Claude to fix → repeat from step 2
+    4. Send to Codex for evaluation
+    5. If issues found → ask Codex to fix → repeat from step 2
     6. Send progress and screenshots to Discord throughout
 
     Returns {"passed": bool, "iterations": int, "final_score": int, "summary": str}
     """
     max_iter = max_iterations or MAX_ITERATIONS
-
-    base_url = os.getenv("ANTHROPIC_BASE_URL")
-    client = anthropic.Anthropic(
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        **({"base_url": base_url} if base_url else {}),
-    )
 
     def report(msg):
         print(f"[test_loop] {msg}")
@@ -191,12 +163,12 @@ async def run_test_loop(
             if error_lines:
                 report(f"🖥️ Console issues:\n```\n{chr(10).join(error_lines[:10])}\n```")
 
-        # Evaluate with Claude vision
-        report("🤖 Claude is evaluating the screenshot...")
+        # Evaluate with Codex
+        report("🤖 Codex is evaluating the screenshot...")
         eval_result = await _evaluate_screenshot(
-            client=client,
             image_data=screenshots[-1] if screenshots else b"",
             console_logs=console_logs,
+            project_path=project_path,
             app_description=app_description,
             test_description=test_description,
             iteration=iteration,
@@ -242,7 +214,7 @@ async def run_test_loop(
         )
         fix_prompt = "\n".join(fix_parts)
 
-        report("🔧 Asking Claude to fix issues...")
+        report("🔧 Asking Codex to fix issues...")
         try:
             fix_result = await claude_exec.run(
                 session_id=session_id,
@@ -255,7 +227,7 @@ async def run_test_loop(
             )
             report(f"🔧 Fix applied: {fix_result[:200]}")
         except claude_exec.TurnLimitReached as e:
-            report(f"⚠️ Claude hit step limit during fix: {e.partial_result[:100]}")
+            report(f"⚠️ Codex hit step limit during fix: {e.partial_result[:100]}")
         except Exception as e:
             report(f"❌ Fix failed: {e}")
             break

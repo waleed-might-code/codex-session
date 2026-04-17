@@ -1,5 +1,5 @@
 """
-Persistent bash session per Claude session.
+Persistent bash session per agent session.
 Tracks CWD across tool calls so `cd` works correctly between commands.
 """
 import os

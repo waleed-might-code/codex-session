@@ -7,7 +7,6 @@ import storage.projects as proj_store
 import storage.sessions as sess_store
 import layers.browser_layer as browser
 import layers.test_loop as test_loop
-import layers.claude_exec as claude_exec
 from utils.discord_helpers import followup, followup_chunks, send_image_to_channel, send_message, opts
 
 
@@ -57,7 +56,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             f"🧪 **Starting visual test loop** for **{proj['name']}**\n"
             f"Description: _{description}_\n"
             f"Max iterations: {max_iter}\n"
-            f"_Claude will test → screenshot → evaluate → fix → repeat until it passes..._"
+            f"_Codex will test → screenshot → evaluate → fix → repeat until it passes..._"
         )
 
         sess = sess_store.get_active_for_channel(channel_id)
