@@ -239,7 +239,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str):
 
     elif sub == "rollback":
         deploy_id = o.get("deployment_id", "")
-        await followup(token, f"⚠️ Rollback for `{deploy_id}` — pull previous commit and redeploy.\n_Manual rollback: run `/claude ask prompt:git revert HEAD && redeploy`_")
+        await followup(token, f"⚠️ Rollback for `{deploy_id}` — pull previous commit and redeploy.\n_Manual rollback: run `/codex ask prompt:git revert HEAD && redeploy`_")
 
     else:
         await followup(token, f"❌ Unknown subcommand: `{sub}`")

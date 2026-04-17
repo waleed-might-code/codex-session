@@ -6,6 +6,7 @@ SCHEMA = {
     "user_id": str, "created_at": str, "updated_at": str,
     "status": str,   # active | closed
     "model": str, "message_count": str, "last_prompt": str,
+    "backend": str, "backend_session_id": str,
 }
 
 TABLE_SUMMARIES = "session_summaries"
@@ -32,8 +33,9 @@ def create(project_name: str, channel_id: str, user_id: str, thread_id: str = ""
         "id": new_id(), "project_name": project_name,
         "channel_id": channel_id, "thread_id": thread_id,
         "user_id": user_id, "created_at": now(), "updated_at": now(),
-        "status": "active", "model": model or "claude-sonnet-4-6",
+        "status": "active", "model": model or "codex-cli",
         "message_count": "0", "last_prompt": "",
+        "backend": "codex", "backend_session_id": "",
     }
     upsert(TABLE, SCHEMA, "id", rec["id"], rec)
     _history[rec["id"]] = []
@@ -89,6 +91,19 @@ def update_last_prompt(session_id: str, prompt: str):
 def get_last_prompt(session_id: str) -> str:
     row = find_one(TABLE, SCHEMA, "id", session_id)
     return row.get("last_prompt", "") if row else ""
+
+
+def set_backend_session_id(session_id: str, backend_session_id: str):
+    upsert(TABLE, SCHEMA, "id", session_id, {
+        "backend_session_id": backend_session_id,
+        "backend": "codex",
+        "updated_at": now(),
+    })
+
+
+def get_backend_session_id(session_id: str) -> str:
+    row = find_one(TABLE, SCHEMA, "id", session_id)
+    return row.get("backend_session_id", "") if row else ""
 
 
 # ── Resume context (in-memory + CSV for restart resilience) ───────────────────

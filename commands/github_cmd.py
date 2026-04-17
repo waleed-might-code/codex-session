@@ -33,7 +33,7 @@ async def handle(sub: str, sub_opts: list, token: str):
         await followup(token,
             f"✅ GitHub connected!\n"
             f"**Username:** `{real_username}`\n"
-            f"Claude can now create repos, push code, commit, and share GitHub links."
+            f"Codex can now create repos, push code, commit, and share GitHub links."
         )
 
     elif sub == "status":

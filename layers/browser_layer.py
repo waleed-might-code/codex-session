@@ -694,7 +694,7 @@ async def audit_page(page=None) -> dict:
 
 
 def format_audit(audit: dict) -> str:
-    """Format audit results into a string for Claude."""
+    """Format audit results into a compact string for the agent."""
     parts = []
     issues = audit.get("issues", [])
     info = audit.get("info", [])
