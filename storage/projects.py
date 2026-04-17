@@ -30,6 +30,9 @@ def list_all() -> list[dict]:
 
 
 def set_active_channel(name: str, channel_id: str, thread_id: str = ""):
+    for proj in find_all(TABLE, SCHEMA):
+        if proj.get("active_channel_id") == channel_id and proj.get("name") != name:
+            upsert(TABLE, SCHEMA, "name", proj["name"], {"active_channel_id": "", "active_thread_id": ""})
     upsert(TABLE, SCHEMA, "name", name, {"active_channel_id": channel_id, "active_thread_id": thread_id})
 
 

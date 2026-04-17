@@ -1,8 +1,9 @@
 import asyncio
+import os
 import storage.projects as proj_store
 import storage.sessions as sess_store
-import layers.claude_exec as claude_exec
-from layers.claude_exec import TurnLimitReached
+import layers.codex_exec as claude_exec
+from layers.codex_exec import TurnLimitReached
 from utils.discord_helpers import followup, followup_chunks, opts
 import utils.discord_helpers as dh
 from utils.security import truncate
@@ -26,14 +27,25 @@ def _require_session(channel_id: str, user_id: str):
             raise ValueError(f"No active project in this channel.\nAvailable projects: {names}\nUse `/project use <name>` to select one.")
         else:
             raise ValueError("No projects registered. Use `/project add` to create one, then `/project use` to activate it.")
+    if not os.path.isdir(proj["path"]):
+        raise ValueError(
+            f"Active project path does not exist on this machine:\n`{proj['path']}`\n"
+            f"Use `/project use {proj['name']}` after fixing the path, or `/project add` to register a valid local path."
+        )
     sess = sess_store.get_active_for_channel(channel_id)
+    if sess and sess.get("project_name") != proj["name"]:
+        sess = None
     if not sess:
-        sess = sess_store.create(proj["name"], channel_id, user_id)
+        sess = sess_store.get_active_root_for_project(proj["name"])
+        if sess:
+            sess_store.attach_channel(sess["id"], channel_id)
+        else:
+            sess = sess_store.create(proj["name"], channel_id, user_id)
     return proj, sess
 
 
 async def _run_with_progress(sess_id, prompt, proj_path, channel_id, followup_fn, followup_chunks_fn, token, max_turns=20):
-    """Shared helper to run Claude with progress streaming and turn-limit handling."""
+    """Shared helper to run Codex with progress streaming."""
     progress_msgs = []
     def on_progress(msg: str):
         progress_msgs.append(msg)
@@ -77,7 +89,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
         except ValueError as e:
             return await followup(token, f"❌ {e}")
 
-        await followup(token, f"🤖 **Claude is working on it...**\nProject: `{proj['name']}`\nSession: `{sess['id']}`")
+        await followup(token, f"🤖 **Codex is working on it...**\nProject: `{proj['name']}`\nSession: `{sess['id']}`")
 
         max_turns = _session_limits.get(sess["id"], 20)
         result, exc = await _run_with_progress(
@@ -99,8 +111,8 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
                 )
             await followup_fn(token,
                 f"⚠️ **Step limit reached ({max_turns} steps).**{summary_text}\n"
-                f"Use `/claude continue` to keep going, `/claude auto` to auto-continue until done, "
-                f"or `/claude limit steps:40` to increase the limit."
+                f"Use `/codex continue` to keep going, `/codex auto` to auto-continue until done, "
+                f"or `/codex limit steps:40` to increase the limit."
             )
             return
 
@@ -114,7 +126,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             return await followup(token, f"❌ {e}")
         if not sess_store.get_history(sess["id"]):
             return await followup(token,
-                "❌ No previous work in this session — use `/claude ask` to start a task first.")
+                "❌ No previous work in this session — use `/codex ask` to start a task first.")
         last = sess.get("last_prompt", "(no previous prompt)")
         await followup(token, f"🔄 Continuing session `{sess['id']}`...\nLast: _{last[:100]}_")
 
@@ -132,7 +144,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             await followup_fn(token,
                 f"⚠️ **Step limit reached again.**\n"
                 f"Remaining: {remaining or 'unknown'}\n"
-                f"Use `/claude continue` or `/claude auto` to keep going."
+                f"Use `/codex continue` or `/codex auto` to keep going."
             )
             return
 
@@ -198,7 +210,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             # All rounds exhausted
             await followup_fn(token,
                 f"⚠️ **Auto-continue exhausted** ({max_rounds} rounds, ~{total_steps} steps).\n"
-                f"Use `/claude auto rounds:10` for more, or `/claude continue` manually."
+                f"Use `/codex auto rounds:10` for more, or `/codex continue` manually."
             )
 
         _auto_continue.pop(sess["id"], None)
@@ -229,7 +241,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
         # Create a new session scoped to the thread
         thread_sess = sess_store.create(proj["name"], thread_id, user_id, thread_id=thread_id)
 
-        await dh.send_message(thread_id, f"🤖 **Claude is working on it...**\nSession: `{thread_sess['id']}`")
+        await dh.send_message(thread_id, f"🤖 **Codex is working on it...**\nSession: `{thread_sess['id']}`")
 
         try:
             result = await claude_exec.run(
@@ -244,7 +256,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             summary = getattr(e, 'task_summary', {})
             await dh.send_message(thread_id,
                 f"⚠️ Step limit reached.\nRemaining: {summary.get('remaining', 'unknown')}\n"
-                f"Use `/claude continue` in this thread to keep going."
+                f"Use `/codex continue` in this thread to keep going."
             )
             return
 
@@ -295,7 +307,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str, user_id:
             except TurnLimitReached as e:
                 if e.partial_result:
                     await dh.send_message_chunks(tid, e.partial_result)
-                await dh.send_message(tid, "⚠️ Step limit reached. Use `/claude continue` here.")
+                await dh.send_message(tid, "⚠️ Step limit reached. Use `/codex continue` here.")
             except Exception as e:
                 await dh.send_message(tid, f"❌ Error: {str(e)[:200]}")
 

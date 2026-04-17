@@ -1,6 +1,6 @@
 import storage.sessions as sess_store
 import storage.projects as proj_store
-import layers.claude_exec as claude_exec
+import layers.codex_exec as claude_exec
 from utils.discord_helpers import followup, opts
 
 
@@ -13,11 +13,45 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str):
             return await followup(token, "No active sessions.")
         lines = ["**Active Sessions:**"]
         for s in sessions:
+            backend_id = s.get("backend_session_id", "")
+            backend_text = f" — codex: `{backend_id[:12]}`" if backend_id else ""
             lines.append(
                 f"• `{s['id']}` — project: **{s['project_name']}** "
-                f"— channel: `{s['channel_id']}` — msgs: {s['message_count']}"
+                f"— channel: `{s['channel_id']}` — msgs: {s['message_count']}{backend_text}"
             )
         await followup(token, "\n".join(lines))
+
+    elif sub == "current":
+        sess = sess_store.get_active_for_channel(channel_id)
+        if not sess:
+            return await followup(token, "No active session in this channel.")
+        await followup(token,
+            f"**Current Session:** `{sess['id']}`\n"
+            f"Project: **{sess['project_name']}**\n"
+            f"Status: `{sess['status']}`\n"
+            f"Messages: {sess['message_count']}\n"
+            f"Codex thread: `{sess.get('backend_session_id', '') or 'not started yet'}`"
+        )
+
+    elif sub == "history":
+        session_id = o.get("id", "")
+        project_name = o.get("project", "")
+        limit = int(o.get("limit", 20))
+        if session_id:
+            rows = sess_store.list_messages(session_id=session_id, limit=limit)
+        elif project_name:
+            rows = sess_store.list_messages(project_name=project_name, limit=limit)
+        else:
+            current = sess_store.get_active_for_channel(channel_id)
+            if not current:
+                return await followup(token, "No active session in this channel.")
+            rows = sess_store.list_messages(session_id=current["id"], limit=limit)
+        if not rows:
+            return await followup(token, "No stored transcript messages found for that scope.")
+        lines = ["**Session Transcript:**"]
+        for row in rows:
+            lines.append(f"`{row['created_at']}` **{row['role']}**: {row['content'][:250]}")
+        await followup(token, "\n".join(lines)[:2000])
 
     elif sub == "resume":
         session_id = o.get("id", "")
@@ -27,7 +61,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str):
         # Close any current active session on this channel before resuming
         current = sess_store.get_active_for_channel(channel_id)
         if current and current["id"] != session_id:
-            import layers.claude_exec as claude_exec
+            import layers.codex_exec as claude_exec
             claude_exec.close_session_shell(current["id"])
             sess_store.close(current["id"])
         if sess["status"] != "active":
@@ -44,6 +78,7 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str):
         await followup(token,
             f"✅ Session `{session_id}` resumed.\n"
             f"Project: **{sess['project_name']}** — {sess['message_count']} messages\n"
+            f"Codex thread: `{sess.get('backend_session_id', '') or 'not started yet'}`\n"
             f"Last prompt: _{sess.get('last_prompt', '(none)')[:100]}_"
         )
 
@@ -55,8 +90,13 @@ async def handle(sub: str, sub_opts: list, token: str, channel_id: str):
             if not sess:
                 return await followup(token, "No active session in this channel.")
             session_id = sess["id"]
+        sess = sess_store.get(session_id)
+        if not sess:
+            return await followup(token, f"❌ Session `{session_id}` not found.")
         sess_store.close(session_id)
-        proj_store.clear_active_channel(channel_id)
+        current = sess_store.get_active_for_channel(channel_id)
+        if not current or current["id"] == session_id:
+            proj_store.clear_active_channel(channel_id)
         await followup(token,
             f"✅ Session `{session_id}` closed.\n"
             f"Project detached from this channel. Use `/project use <name>` to start fresh."
