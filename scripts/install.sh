@@ -57,6 +57,12 @@ pip install --upgrade pip
 pip install -r requirements.txt
 python -m playwright install chromium
 
+if ! command -v codex >/dev/null 2>&1; then
+  echo "Codex CLI is required but not installed."
+  echo "Install Codex first, then rerun this script."
+  exit 1
+fi
+
 if [[ ! -f .env ]]; then
   cp .env.example .env
 fi
@@ -85,6 +91,7 @@ echo
 echo "Install complete."
 echo "Next steps:"
 echo "  1. Edit ${APP_DIR}/.env"
-echo "  2. Run: cd ${APP_DIR} && . .venv/bin/activate && python register_commands.py"
-echo "  3. Start: systemctl restart ${SERVICE_NAME}"
-echo "  4. Logs:  journalctl -u ${SERVICE_NAME} -f"
+echo "  2. Run Codex auth as the service user: codex login"
+echo "  3. Run: cd ${APP_DIR} && . .venv/bin/activate && python register_commands.py"
+echo "  4. Start: systemctl restart ${SERVICE_NAME}"
+echo "  5. Logs:  journalctl -u ${SERVICE_NAME} -f"

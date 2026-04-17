@@ -6,7 +6,8 @@ Turn the current Discord bot into a Codex-native session manager that runs conti
 
 ## Current State
 
-- `layers/claude_exec.py` and `layers/test_loop.py` are tightly coupled to Anthropic APIs.
+- `layers/codex_exec.py` now backs the runtime and persists Codex thread IDs per Discord session.
+- `layers/claude_exec.py` is now a compatibility wrapper so older imports keep working during the `/codex` rollout.
 - Session persistence already exists in `storage/sessions.py`.
 - Server, deploy, GitHub, and Cloudflare primitives already exist in `layers/ssh_layer.py`, `storage/servers.py`, `layers/cloudflare_layer.py`, and `tools/pexo_github.py`.
 - The bot is already designed around channel-scoped project/session context, which is a good fit for Codex session routing.
@@ -75,8 +76,8 @@ Avoid Lambda, queues, and managed workflow dependencies in phase 1.
 
 ## Delivery Phases
 
-1. Publish sanitized repo, README, installer, and this spec.
-2. Introduce backend abstraction and `codex_exec.py`.
-3. Migrate Discord commands from `/claude` to `/codex`.
-4. Add rich Discord event reporting for tool calls, diffs, deploys, and PRs.
+1. Done: publish sanitized repo, README, installer, and this spec.
+2. Done: introduce the `codex_exec.py` backend and Codex session persistence.
+3. In progress: migrate Discord commands from `/claude` to `/codex` while keeping a legacy alias.
+4. Add richer Discord event reporting for tool calls, diffs, deploys, and PRs.
 5. Harden multi-session supervision, resume, and failure recovery.
