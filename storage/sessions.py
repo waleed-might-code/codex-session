@@ -102,6 +102,16 @@ def list_for_project(project_name: str, include_closed: bool = False) -> list[di
     return [r for r in rows if r["status"] == "active"]
 
 
+def list_thread_sessions(project_name: str = "", include_closed: bool = False) -> list[dict]:
+    rows = find_all(TABLE, SCHEMA)
+    if project_name:
+        rows = [r for r in rows if r["project_name"] == project_name]
+    rows = [r for r in rows if r.get("thread_id")]
+    if include_closed:
+        return rows
+    return [r for r in rows if r["status"] == "active"]
+
+
 def attach_channel(session_id: str, channel_id: str, thread_id: str = ""):
     upsert(TABLE, SCHEMA, "id", session_id, {
         "channel_id": channel_id,
@@ -225,6 +235,36 @@ def list_messages(session_id: str = "", project_name: str = "", channel_id: str 
     if limit > 0:
         rows = rows[-limit:]
     return rows
+
+
+def search_messages(text: str, session_id: str = "", project_name: str = "", channel_id: str = "",
+                    role: str = "", limit: int = 20) -> list[dict]:
+    needle = (text or "").strip().lower()
+    if not needle:
+        return []
+    rows = list_messages(session_id=session_id, project_name=project_name, channel_id=channel_id, limit=0)
+    if role:
+        rows = [r for r in rows if r["role"] == role]
+    matches = []
+    for row in rows:
+        content = str(row.get("content", ""))
+        idx = content.lower().find(needle)
+        if idx < 0:
+            continue
+        start = max(0, idx - 80)
+        end = min(len(content), idx + len(needle) + 120)
+        match = dict(row)
+        match["excerpt"] = content[start:end].replace("\n", " ")
+        session = get(row["session_id"])
+        if session:
+            match["thread_id"] = session.get("thread_id", "")
+            match["session_status"] = session.get("status", "")
+            match["backend_session_id"] = session.get("backend_session_id", "")
+        matches.append(match)
+    matches.sort(key=lambda r: (r.get("created_at", ""), r.get("id", "")))
+    if limit > 0:
+        matches = matches[-limit:]
+    return matches
 
 
 def build_recovery_prompt(session_id: str, latest_prompt: str, limit: int = 12) -> str:

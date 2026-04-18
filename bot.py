@@ -18,10 +18,15 @@ sys.path.insert(0, ROOT)
 
 # ── Discord helpers ───────────────────────────────────────────────────────────
 import utils.discord_helpers as dh
+import utils.session_threads as session_threads
 import storage.projects as proj_store
 import storage.sessions as sess_store
 import storage.discord_jobs as discord_jobs_store
+import storage.discord_ops as discord_ops_store
+import storage.agent_ops as agent_ops_store
 import layers.codex_exec as claude_exec
+import tools.pexo_discord as pexo_discord_tool
+import tools.pexo_agents as pexo_agents_tool
 dh.init(os.getenv("DISCORD_BOT_TOKEN"))
 
 # ── Storage bootstrap ─────────────────────────────────────────────────────────
@@ -360,6 +365,7 @@ async def _run_bulk_from_specs(channel_id: str, user_id: str, proj: dict, specs:
             project_path=proj["path"],
             progress_cb=progress,
             channel_id=dest,
+            user_id=user_id,
             bulk_run_id=bulk_run_id,
         )
 
@@ -427,6 +433,481 @@ async def _run_bulk_from_specs(channel_id: str, user_id: str, proj: dict, specs:
 # ── Plain message handler ─────────────────────────────────────────────────────
 
 _BOT_ID = None  # set on READY
+_pending_project_create: dict[str, dict] = {}
+
+
+def _project_slug(text: str) -> str:
+    cleaned = _re.sub(r"[^a-zA-Z0-9._-]+", "-", (text or "").strip()).strip("-._").lower()
+    return cleaned[:64]
+
+
+def _normalize_project_query(text: str) -> str:
+    return _re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def _projects_dir() -> str:
+    path = os.path.join(ROOT, "projects")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _project_names_text(projects: list[dict] | None = None) -> str:
+    projects = projects if projects is not None else proj_store.list_all()
+    if not projects:
+        return "(none)"
+    return ", ".join(f"`{p['name']}`" for p in projects)
+
+
+def _find_project_by_text(text: str) -> dict | None:
+    query = (text or "").strip().strip("`'\"")
+    if not query:
+        return None
+    projects = proj_store.list_all()
+    if not projects:
+        return None
+
+    lowered = query.lower()
+    exact = next((p for p in projects if p["name"].lower() == lowered), None)
+    if exact:
+        return exact
+
+    normalized = _normalize_project_query(query)
+    canonical_matches = [p for p in projects if _normalize_project_query(p["name"]) == normalized]
+    if len(canonical_matches) == 1:
+        return canonical_matches[0]
+
+    contains = [p for p in projects if lowered in p["name"].lower()]
+    if len(contains) == 1:
+        return contains[0]
+    return None
+
+
+def _extract_create_project_name(text: str) -> str:
+    stripped = (text or "").strip()
+    patterns = [
+        r"^(?:please\s+)?(?:can you\s+)?(?:create|add|make|start)\s+(?:me\s+)?(?:a\s+)?project(?:\s+(?:called|named)\s+|\s+)(?P<name>[a-zA-Z0-9][\w ._-]{0,80})$",
+        r"^(?:please\s+)?new\s+project(?:\s+(?:called|named)\s+|\s+)(?P<name>[a-zA-Z0-9][\w ._-]{0,80})$",
+    ]
+    for pattern in patterns:
+        match = _re.match(pattern, stripped, _re.IGNORECASE)
+        if match:
+            return match.group("name").strip().strip("`'\"")
+    return ""
+
+
+def _extract_switch_project_name(text: str) -> str:
+    stripped = (text or "").strip()
+    patterns = [
+        r"^(?:please\s+)?(?:can you\s+)?(?:switch|shift|move|use|open|select|go)\s+(?:me\s+)?(?:to\s+)?(?:project\s+)?(?P<name>[a-zA-Z0-9][\w ._-]{0,80})$",
+        r"^(?:please\s+)?work on\s+(?:project\s+)?(?P<name>[a-zA-Z0-9][\w ._-]{0,80})$",
+    ]
+    for pattern in patterns:
+        match = _re.match(pattern, stripped, _re.IGNORECASE)
+        if match:
+            return match.group("name").strip().strip("`'\"")
+    return ""
+
+
+def _current_project_for_channel(channel_id: str) -> dict | None:
+    proj = proj_store.get_by_channel(channel_id)
+    if proj:
+        return proj
+    sess = sess_store.get_active_for_channel(channel_id)
+    if sess and sess.get("project_name"):
+        return proj_store.get(sess["project_name"])
+    return None
+
+
+def _current_session_for_channel(channel_id: str) -> dict | None:
+    sess = sess_store.get_active_for_channel(channel_id)
+    if sess:
+        return sess
+    proj = _current_project_for_channel(channel_id)
+    if proj:
+        return sess_store.get_active_root_for_project(proj["name"])
+    return None
+
+
+async def _run_codex_in_channel(dest_channel_id: str, sess: dict, proj: dict, prompt: str, user_id: str,
+                                image_data: bytes = None, image_media_type: str = "image/png") -> bool:
+    progress_queue = asyncio.Queue()
+
+    def on_progress(msg: str):
+        print(f"[codex:{dest_channel_id}] {msg}")
+        asyncio.get_event_loop().call_soon_threadsafe(progress_queue.put_nowait, msg)
+
+    async def send_typing_loop():
+        while True:
+            await dh.send_typing(dest_channel_id)
+            msgs = []
+            while not progress_queue.empty():
+                msgs.append(await progress_queue.get())
+            if msgs:
+                await dh.send_message(dest_channel_id, "\n".join(msgs[-5:]))
+            await asyncio.sleep(8)
+
+    typing_task = asyncio.create_task(send_typing_loop())
+    try:
+        result = await claude_exec.run(
+            session_id=sess["id"],
+            prompt=prompt,
+            project_path=proj["path"],
+            progress_cb=on_progress,
+            image_data=image_data,
+            image_media_type=image_media_type,
+            channel_id=dest_channel_id,
+            user_id=user_id,
+        )
+    except claude_exec.TurnLimitReached as e:
+        typing_task.cancel()
+        if e.partial_result:
+            await dh.send_message_chunks(dest_channel_id, e.partial_result)
+        await dh.send_message(
+            dest_channel_id,
+            "⚠️ **Step limit reached (20 steps).**\n"
+            "Say `continue` to keep going, or use `/codex limit` to increase the limit."
+        )
+        return False
+    except Exception as e:
+        import traceback
+        print(f"[!] run_codex_in_channel error: {e}\n{traceback.format_exc()}")
+        typing_task.cancel()
+        await dh.send_message(dest_channel_id, f"❌ Error: {str(e)[:200]}")
+        return False
+    finally:
+        typing_task.cancel()
+
+    await dh.send_message_chunks(dest_channel_id, result)
+    return True
+
+
+def _activate_project(name: str, channel_id: str, user_id: str) -> tuple[dict, dict]:
+    proj = proj_store.get(name)
+    if not proj:
+        raise ValueError(f"Project `{name}` not found.")
+    proj_store.set_active_channel(name, channel_id)
+    sess = sess_store.get_active_for_channel(channel_id)
+    if sess and sess.get("project_name") != name:
+        claude_exec.close_session_shell(sess["id"])
+        sess_store.close(sess["id"])
+        sess = None
+    if not sess or sess.get("project_name") != name:
+        sess = sess_store.get_active_root_for_project(name)
+        if sess:
+            sess_store.attach_channel(sess["id"], channel_id)
+        else:
+            sess = sess_store.create(name, channel_id, user_id)
+    return proj, sess
+
+
+def _create_project_record(name: str) -> dict:
+    slug = _project_slug(name)
+    if not slug:
+        raise ValueError("Project name must include letters or numbers.")
+    path = os.path.join(_projects_dir(), slug)
+    os.makedirs(path, exist_ok=True)
+    return proj_store.add(slug, path, "")
+
+
+async def _run_control_plane_turn(channel_id: str, user_id: str, prompt: str,
+                                  image_data: bytes = None, image_media_type: str = "image/png"):
+    progress_queue = asyncio.Queue()
+
+    def on_progress(msg: str):
+        print(f"[codex-control] {msg}")
+        asyncio.get_event_loop().call_soon_threadsafe(progress_queue.put_nowait, msg)
+
+    async def send_typing_loop():
+        while True:
+            await dh.send_typing(channel_id)
+            msgs = []
+            while not progress_queue.empty():
+                msgs.append(await progress_queue.get())
+            if msgs:
+                await dh.send_message(channel_id, "\n".join(msgs[-5:]))
+            await asyncio.sleep(8)
+
+    control_prompt = (
+        "No active project is currently bound to this Discord channel.\n"
+        "You are in control mode. Help the user manage projects, sessions, Discord tasks, "
+        "and infrastructure from conversation.\n"
+        "Use $PEXO_PYTHON $PEXO_CONTEXT to inspect/create/switch projects and inspect/close sessions/history.\n"
+        "Use $PEXO_PYTHON $PEXO_DISCORD for Discord-native actions.\n"
+        "Use $PEXO_PYTHON $PEXO_AGENTS to spawn and manage delegated project agents once a project is active.\n"
+        "Do not edit the bot repository itself unless the user explicitly asks you to work on this bot.\n"
+        "If the user wants coding work on an app, create or switch to a project first, then tell them it is ready.\n\n"
+        f"User message:\n{prompt}"
+    )
+
+    typing_task = asyncio.create_task(send_typing_loop())
+    try:
+        result, _ = await claude_exec.run_once(
+            prompt=control_prompt,
+            project_path=ROOT,
+            progress_cb=on_progress,
+            image_data=image_data,
+            image_media_type=image_media_type,
+            channel_id=channel_id,
+            user_id=user_id,
+            sandbox="workspace-write",
+        )
+        await dh.send_message_chunks(channel_id, result)
+    except Exception as e:
+        await dh.send_message(channel_id, f"❌ Error: {str(e)[:200]}")
+    finally:
+        typing_task.cancel()
+
+
+def _looks_like_thread_intent(text: str) -> bool:
+    lower = (text or "").lower().strip()
+    if not lower:
+        return False
+    if "thread" in lower:
+        return any(word in lower for word in ("create", "make", "start", "open", "move", "shift"))
+    if "threa" in lower:
+        return any(word in lower for word in ("create", "make", "start", "open", "move", "shift"))
+    return False
+
+
+async def _maybe_handle_control_message(channel_id: str, user_id: str, content: str) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+
+    lower = text.lower().strip()
+    current_proj = _current_project_for_channel(channel_id)
+    current_sess = _current_session_for_channel(channel_id)
+    pending = _pending_project_create.get(channel_id)
+
+    if pending:
+        if lower in {"cancel", "never mind", "nevermind", "nvm"}:
+            _pending_project_create.pop(channel_id, None)
+            await dh.send_message(channel_id, "✅ Project creation cancelled.")
+            return True
+        try:
+            created = _create_project_record(_extract_create_project_name(text) or text)
+            proj, sess = _activate_project(created["name"], channel_id, user_id)
+            _pending_project_create.pop(channel_id, None)
+            await dh.send_message(
+                channel_id,
+                f"✅ Project **{proj['name']}** created and selected.\n"
+                f"📁 `{proj['path']}`\n"
+                f"🔑 Session: `{sess['id']}`\n"
+                "You can start chatting with Codex here now."
+            )
+        except Exception as e:
+            await dh.send_message(channel_id, f"❌ {str(e)[:200]}")
+        return True
+
+    if _looks_like_thread_intent(text):
+        if current_sess and current_sess.get("thread_id") == channel_id:
+            await dh.send_message(channel_id, f"🧵 This session is already running in <#{channel_id}>.")
+            return True
+        if current_proj:
+            try:
+                thread_sess, thread_id, created = await session_threads.ensure_parent_thread_session(
+                    current_proj,
+                    channel_id,
+                    user_id,
+                    thread_name=f"{current_proj['name']} session",
+                )
+                if created:
+                    await dh.send_message(
+                        channel_id,
+                        f"🧵 Created the session thread: <#{thread_id}>. Continue there for the rest of this work."
+                    )
+                else:
+                    await dh.send_message(
+                        channel_id,
+                        f"🧵 The active session thread is <#{thread_id}>. Continue there for the rest of this work."
+                    )
+            except Exception as e:
+                await dh.send_message(channel_id, f"❌ {str(e)[:200]}")
+            return True
+
+        try:
+            created = await dh.create_thread_standalone(
+                channel_id,
+                "codex session",
+                initial_message=f"Continuing this Codex session from <#{channel_id}>.",
+            )
+            thread_id = created.get("thread_id", "")
+            if not thread_id:
+                raise RuntimeError("Failed to create the thread.")
+            sess = sess_store.create("", thread_id, user_id, thread_id=thread_id)
+            await dh.send_message(
+                channel_id,
+                f"🧵 Created <#{thread_id}> for this session. Continue there and I’ll work with you in that thread."
+            )
+            await dh.send_message(
+                thread_id,
+                f"🧵 **Thread ready.** Session: `{sess['id']}`\nTell me what you want to do here."
+            )
+        except Exception as e:
+            await dh.send_message(channel_id, f"❌ {str(e)[:200]}")
+        return True
+
+    if any(phrase in lower for phrase in ("how many projects", "list projects", "show projects", "what projects")):
+        projects = proj_store.list_all()
+        if not projects:
+            await dh.send_message(channel_id, "No projects yet. Say `create a project called my-app` to start one.")
+            return True
+        lines = [f"📁 {len(projects)} project(s):"]
+        for proj in projects[:20]:
+            marker = " ← active here" if current_proj and proj["name"] == current_proj["name"] else ""
+            lines.append(f"• **{proj['name']}** — `{proj['path']}`{marker}")
+        await dh.send_message(channel_id, "\n".join(lines))
+        return True
+
+    if "current project" in lower or "what project" in lower:
+        if current_proj:
+            message = (
+                f"📁 Current project: **{current_proj['name']}**\n"
+                f"📂 `{current_proj['path']}`"
+            )
+            if current_sess:
+                message += f"\n🔑 Session: `{current_sess['id']}`"
+            await dh.send_message(
+                channel_id,
+                message,
+            )
+        else:
+            await dh.send_message(
+                channel_id,
+                f"No active project in this channel.\nAvailable: {_project_names_text()}\n"
+                "Say `create a project called my-app` or `switch to test`."
+            )
+        return True
+
+    create_name = _extract_create_project_name(text)
+    wants_create = bool(create_name) or any(
+        phrase in lower for phrase in ("create a project", "new project", "add project", "make a project", "start a project")
+    )
+    if wants_create:
+        if not create_name:
+            _pending_project_create[channel_id] = {"user_id": user_id}
+            await dh.send_message(channel_id, "What should I call the new project?")
+            return True
+        try:
+            created = _create_project_record(create_name)
+            proj, sess = _activate_project(created["name"], channel_id, user_id)
+            await dh.send_message(
+                channel_id,
+                f"✅ Project **{proj['name']}** created and selected.\n"
+                f"📁 `{proj['path']}`\n"
+                f"🔑 Session: `{sess['id']}`\n"
+                "You can start chatting with Codex here now."
+            )
+        except Exception as e:
+            await dh.send_message(channel_id, f"❌ {str(e)[:200]}")
+        return True
+
+    switch_name = _extract_switch_project_name(text)
+    wants_switch = bool(switch_name) or any(phrase in lower for phrase in ("switch project", "shift project", "use project"))
+    if wants_switch:
+        target = _find_project_by_text(switch_name or text)
+        if not target:
+            await dh.send_message(
+                channel_id,
+                f"❌ I couldn't match that project.\nAvailable: {_project_names_text()}"
+            )
+            return True
+        try:
+            proj, sess = _activate_project(target["name"], channel_id, user_id)
+            await dh.send_message(
+                channel_id,
+                f"✅ Switched to **{proj['name']}**.\n"
+                f"📁 `{proj['path']}`\n"
+                f"🔑 Session: `{sess['id']}`"
+            )
+        except Exception as e:
+            await dh.send_message(channel_id, f"❌ {str(e)[:200]}")
+        return True
+
+    if any(phrase in lower for phrase in ("list sessions", "show sessions", "how many sessions")):
+        sessions = sess_store.list_active()
+        if not sessions:
+            await dh.send_message(channel_id, "No active sessions.")
+            return True
+        lines = [f"🧠 {len(sessions)} active session(s):"]
+        for sess in sessions[:20]:
+            marker = " ← active here" if current_sess and sess["id"] == current_sess["id"] else ""
+            lines.append(f"• `{sess['id']}` — **{sess['project_name'] or 'control'}**{marker}")
+        await dh.send_message(channel_id, "\n".join(lines))
+        return True
+
+    if "current session" in lower or "what session" in lower:
+        if not current_sess:
+            await dh.send_message(channel_id, "No active session in this channel.")
+        else:
+            await dh.send_message(
+                channel_id,
+                f"🔑 Current session: `{current_sess['id']}`\n"
+                f"📁 Project: **{current_sess['project_name'] or 'control'}**\n"
+                f"💬 Messages: {current_sess['message_count']}"
+            )
+        return True
+
+    if any(phrase in lower for phrase in ("close session", "end session", "stop session")):
+        if not current_sess:
+            await dh.send_message(channel_id, "No active session in this channel.")
+            return True
+        sess_store.close(current_sess["id"])
+        proj_store.clear_active_channel(channel_id)
+        await dh.send_message(
+            channel_id,
+            f"✅ Session `{current_sess['id']}` closed.\n"
+            "This channel no longer has an active project."
+        )
+        return True
+
+    if any(phrase in lower for phrase in ("new session", "restart session", "fresh session")):
+        if not current_proj:
+            await dh.send_message(channel_id, "No active project in this channel. Create or switch to a project first.")
+            return True
+        if current_sess:
+            sess_store.close(current_sess["id"])
+        sess = sess_store.create(current_proj["name"], channel_id, user_id)
+        await dh.send_message(
+            channel_id,
+            f"✅ Started a fresh session for **{current_proj['name']}**.\n"
+            f"🔑 Session: `{sess['id']}`"
+        )
+        return True
+
+    if any(phrase in lower for phrase in ("show history", "session history", "chat history")):
+        if not current_sess:
+            await dh.send_message(channel_id, "No active session in this channel.")
+            return True
+        rows = sess_store.list_messages(session_id=current_sess["id"], limit=10)
+        if not rows:
+            await dh.send_message(channel_id, "No stored transcript messages for this session yet.")
+            return True
+        lines = [f"🗂 Recent history for `{current_sess['id']}`:"]
+        for row in rows:
+            lines.append(f"• **{row['role']}**: {row['content'][:160]}")
+        await dh.send_message(channel_id, "\n".join(lines)[:1900])
+        return True
+
+    if not current_proj:
+        casual = {
+            "hello", "hi", "hey", "sup", "yo", "hiya", "howdy",
+            "how are you", "how r u", "how are u", "what's up", "whats up",
+            "good morning", "good evening", "good afternoon", "good night",
+        }
+        stripped = lower.rstrip("!?.").strip()
+        in_session_thread = bool(current_sess and current_sess.get("thread_id") == channel_id)
+        if in_session_thread:
+            return False
+        if stripped in casual or stripped.startswith(("hi ", "hey ", "hello ", "yo ")):
+            await dh.send_message(
+                channel_id,
+                "👋 Yo. I'm here. I can create or switch projects, manage sessions and threads, "
+                "or just help you figure out what to work on next. What do you want to do?"
+            )
+            return True
+
+    return False
 
 async def handle_message(data: dict):
     channel_id = data.get("channel_id", "")
@@ -438,8 +919,18 @@ async def handle_message(data: dict):
     if author.get("bot"):
         return
 
+    bound_proj = proj_store.get_by_channel(channel_id)
+    bound_thread_sess = sess_store.get_active_for_channel(channel_id)
+    active_thread_sess = session_threads.get_active_thread_session(bound_proj) if bound_proj else None
+
     # Quick "continue" shorthand for plain messages
     if content.lower() in ("continue", "c", "go", "keep going"):
+        if bound_proj and active_thread_sess and active_thread_sess.get("thread_id") and active_thread_sess.get("thread_id") != channel_id:
+            await dh.send_message(
+                channel_id,
+                f"🧵 This session is running in <#{active_thread_sess['thread_id']}>. Continue there for the rest of this work."
+            )
+            return
         sess = sess_store.get_active_for_channel(channel_id)
         if not sess:
             proj = proj_store.get_by_channel(channel_id)
@@ -460,6 +951,7 @@ async def handle_message(data: dict):
                         prompt="Continue where you left off. Complete the remaining tasks.",
                         project_path=proj["path"],
                         channel_id=channel_id,
+                        user_id=user_id,
                     )
                     await dh.send_message_chunks(channel_id, result)
                 except claude_exec.TurnLimitReached as e:
@@ -474,6 +966,8 @@ async def handle_message(data: dict):
     # Interruption: "stop" or "cancel" cancels the running Codex task + auto-continue + bulk
     if content.lower() in ("stop", "cancel", "s"):
         sess = sess_store.get_active_for_channel(channel_id)
+        if not sess and bound_proj and active_thread_sess and active_thread_sess.get("thread_id"):
+            sess = active_thread_sess
         if not sess:
             proj = proj_store.get_by_channel(channel_id)
             if proj:
@@ -488,22 +982,35 @@ async def handle_message(data: dict):
                 _bulk_cancel[channel_id] = True
             except ImportError:
                 pass
-            await dh.send_message(channel_id, "⛔ Stopping after current step (auto-continue/bulk also cancelled)...")
+            if sess.get("thread_id") and sess.get("thread_id") != channel_id:
+                await dh.send_message(
+                    channel_id,
+                    f"⛔ Stopping the active session in <#{sess['thread_id']}> after the current step..."
+                )
+            else:
+                await dh.send_message(channel_id, "⛔ Stopping after current step (auto-continue/bulk also cancelled)...")
         return
 
+    if not data.get("attachments"):
+        handled = await _maybe_handle_control_message(channel_id, user_id, content)
+        if handled:
+            return
+
     # Only respond if a project is active for this channel
-    proj = proj_store.get_by_channel(channel_id)
+    proj = bound_proj
+    project_from_parent_binding = bool(proj)
     if not proj:
         # Check if this is a thread with an active session (from /codex thread or /codex bulk)
         thread_sess = sess_store.get_active_for_channel(channel_id)
         if thread_sess and thread_sess.get("project_name"):
             proj = proj_store.get(thread_sess["project_name"])
         if not proj:
-            all_projects = proj_store.list_all()
-            if all_projects and content:
-                names = ", ".join(f"`{p['name']}`" for p in all_projects)
-                await dh.send_message(channel_id,
-                    f"No active project in this channel.\nAvailable: {names}\nUse `/project use <name>` to select one."
+            if content:
+                await _run_control_plane_turn(channel_id, user_id, content)
+            elif data.get("attachments"):
+                await dh.send_message(
+                    channel_id,
+                    "No active project in this channel yet. Create or switch to a project before sending files or images for work."
                 )
             return
 
@@ -546,23 +1053,6 @@ async def handle_message(data: dict):
     if not content and not image_data:
         return
 
-    # ── Casual message detection — don't run Codex on greetings/chitchat ──────
-    if content and not image_data and not text_file_content and len(content) < 60:
-        _casual = {
-            "hello", "hi", "hey", "sup", "yo", "hiya", "howdy",
-            "how are you", "how r u", "how are u", "what's up", "whats up",
-            "good morning", "good evening", "good afternoon", "good night",
-            "thanks", "thank you", "ty", "thx", "ok", "okay", "cool", "nice",
-            "great", "awesome", "perfect", "sounds good", "got it", "noted",
-            "lol", "haha", "😂", "👍", "🙏",
-        }
-        _stripped = content.lower().strip().rstrip("!?.").strip()
-        if _stripped in _casual or (_stripped.startswith(("hi ", "hey ", "hello ")) and len(_stripped) < 30):
-            await dh.send_message(channel_id,
-                f"👋 Hey! I'm ready to work on **{proj['name']}** with Codex. What would you like me to build or fix?"
-            )
-            return
-
     # ── Auto-bulk detection: numbered app specs → 1 thread per app ────────
     if content and not image_data:
         print(f"[bulk-detect] checking content ({len(content)} chars) for numbered specs...")
@@ -591,9 +1081,42 @@ async def handle_message(data: dict):
         if skill_name in list_skills():
             await dh.send_message(channel_id, f"🎨 **Skill `{skill_name}` activated** — running with full design guides...")
 
-    await dh.send_typing(channel_id)
+    if project_from_parent_binding:
+        existing_thread_sess = session_threads.get_active_thread_session(proj)
+        if existing_thread_sess and existing_thread_sess.get("thread_id"):
+            await dh.send_message(
+                channel_id,
+                f"🧵 This project's active session is in <#{existing_thread_sess['thread_id']}>. Continue there for the rest of this task."
+            )
+            return
 
-    sess = sess_store.get_active_for_channel(channel_id)
+        await dh.send_typing(channel_id)
+        thread_sess, thread_id, _created = await session_threads.ensure_parent_thread_session(
+            proj,
+            channel_id,
+            user_id,
+            thread_name=f"{proj['name']} session",
+        )
+        await dh.send_message(
+            channel_id,
+            f"🧵 I opened <#{thread_id}> for this session and started the work there. Continue in that thread for the rest of this task."
+        )
+        await dh.send_message(
+            thread_id,
+            f"🤖 **Codex is working on it...**\nProject: `{proj['name']}`\nSession: `{thread_sess['id']}`"
+        )
+        await _run_codex_in_channel(
+            thread_id,
+            thread_sess,
+            proj,
+            prompt,
+            user_id,
+            image_data=image_data,
+            image_media_type=image_media_type,
+        )
+        return
+
+    sess = bound_thread_sess
     if sess and sess.get("project_name") != proj["name"]:
         sess = None
     if not sess:
@@ -602,52 +1125,16 @@ async def handle_message(data: dict):
             sess_store.attach_channel(sess["id"], channel_id)
         else:
             sess = sess_store.create(proj["name"], channel_id, user_id)
-    progress_queue = asyncio.Queue()
-    def on_progress(msg: str):
-        print(f"[codex] {msg}")
-        asyncio.get_event_loop().call_soon_threadsafe(progress_queue.put_nowait, msg)
-
-    async def send_typing_loop():
-        while True:
-            await dh.send_typing(channel_id)
-            msgs = []
-            while not progress_queue.empty():
-                msgs.append(await progress_queue.get())
-            if msgs:
-                await dh.send_message(channel_id, "\n".join(msgs[-5:]))
-            await asyncio.sleep(8)
-
-    typing_task = asyncio.create_task(send_typing_loop())
-    try:
-        result = await claude_exec.run(
-            session_id=sess["id"],
-            prompt=prompt,
-            project_path=proj["path"],
-            progress_cb=on_progress,
-            image_data=image_data,
-            image_media_type=image_media_type,
-            channel_id=channel_id,
-        )
-    except claude_exec.TurnLimitReached as e:
-        typing_task.cancel()
-        if e.partial_result:
-            await dh.send_message_chunks(channel_id, e.partial_result)
-        await dh.send_message(channel_id,
-            "⚠️ **Step limit reached (20 steps).**\n"
-            "Say `continue` to keep going, or use `/codex limit` to increase the limit."
-        )
-        return
-    except Exception as e:
-        import traceback
-        print(f"[!] handle_message error: {e}\n{traceback.format_exc()}")
-        typing_task.cancel()
-        message = str(e)[:200]
-        await dh.send_message(channel_id, f"❌ Error: {message}")
-        return
-    finally:
-        typing_task.cancel()
-
-    await dh.send_message_chunks(channel_id, result)
+    await dh.send_typing(channel_id)
+    await _run_codex_in_channel(
+        channel_id,
+        sess,
+        proj,
+        prompt,
+        user_id,
+        image_data=image_data,
+        image_media_type=image_media_type,
+    )
 
 
 # ── Gateway loop ──────────────────────────────────────────────────────────────
@@ -718,9 +1205,69 @@ async def discord_jobs_loop():
         await asyncio.sleep(15)
 
 
+async def discord_ops_loop():
+    while True:
+        try:
+            for op in discord_ops_store.list_pending(limit=10):
+                op_id = op.get("id", "")
+                try:
+                    request = json.loads(op.get("request_json", "") or "{}")
+                except Exception as e:
+                    discord_ops_store.mark_failed(op_id, f"Invalid discord op payload: {e}")
+                    print(f"[discord-ops] invalid payload {op_id}: {e}")
+                    continue
+
+                discord_ops_store.mark_processing(op_id)
+                try:
+                    result = await pexo_discord_tool.execute_request(request)
+                    discord_ops_store.mark_done(op_id, result)
+                    print(f"[discord-ops] completed {op_id}: {request.get('cmd', '')}")
+                except SystemExit as e:
+                    message = str(e) or "Discord operation failed."
+                    discord_ops_store.mark_failed(op_id, message)
+                    print(f"[discord-ops] failed {op_id}: {message}")
+                except Exception as e:
+                    discord_ops_store.mark_failed(op_id, str(e))
+                    print(f"[discord-ops] failed {op_id}: {e}")
+        except Exception as e:
+            print(f"[discord-ops] loop error: {e}")
+        await asyncio.sleep(0.25)
+
+
+async def agent_ops_loop():
+    while True:
+        try:
+            for op in agent_ops_store.list_pending(limit=10):
+                op_id = op.get("id", "")
+                try:
+                    request = json.loads(op.get("request_json", "") or "{}")
+                except Exception as e:
+                    agent_ops_store.mark_failed(op_id, f"Invalid agent op payload: {e}")
+                    print(f"[agent-ops] invalid payload {op_id}: {e}")
+                    continue
+
+                agent_ops_store.mark_processing(op_id)
+                try:
+                    result = pexo_agents_tool.execute_request(request)
+                    agent_ops_store.mark_done(op_id, result)
+                    print(f"[agent-ops] completed {op_id}: {request.get('cmd', '')}")
+                except SystemExit as e:
+                    message = str(e) or "Agent operation failed."
+                    agent_ops_store.mark_failed(op_id, message)
+                    print(f"[agent-ops] failed {op_id}: {message}")
+                except Exception as e:
+                    agent_ops_store.mark_failed(op_id, str(e))
+                    print(f"[agent-ops] failed {op_id}: {e}")
+        except Exception as e:
+            print(f"[agent-ops] loop error: {e}")
+        await asyncio.sleep(0.25)
+
+
 async def main():
     print("[*] Starting ProjectExo...")
     asyncio.create_task(discord_jobs_loop())
+    asyncio.create_task(discord_ops_loop())
+    asyncio.create_task(agent_ops_loop())
     while True:
         try:
             await gateway_loop()
