@@ -36,6 +36,10 @@ def set_active_channel(name: str, channel_id: str, thread_id: str = ""):
     upsert(TABLE, SCHEMA, "name", name, {"active_channel_id": channel_id, "active_thread_id": thread_id})
 
 
+def set_active_thread(name: str, thread_id: str = ""):
+    upsert(TABLE, SCHEMA, "name", name, {"active_thread_id": thread_id})
+
+
 def remove(name: str):
     delete_where(TABLE, SCHEMA, "name", name)
 
@@ -45,6 +49,10 @@ def clear_active_channel(channel_id: str):
     proj = find_one(TABLE, SCHEMA, "active_channel_id", channel_id)
     if proj:
         upsert(TABLE, SCHEMA, "name", proj["name"], {"active_channel_id": "", "active_thread_id": ""})
+
+
+def clear_active_thread(name: str):
+    upsert(TABLE, SCHEMA, "name", name, {"active_thread_id": ""})
 
 
 def update_branch(name: str, branch: str):
