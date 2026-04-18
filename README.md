@@ -2,7 +2,7 @@
 
 Codex Session is a Discord-first coding workspace for people running a plain Ubuntu VPS from Contabo, Linode, Hetzner, or similar providers. The goal is simple: keep long-running Codex coding sessions alive on your server, prompt them from Discord, and let the bot manage GitHub, SSH deploys, ports, and Cloudflare tunnels without forcing you into AWS-heavy infrastructure.
 
-This repository currently ships the working ProjectExo bot codebase plus a concrete migration plan to replace the Anthropic-specific execution layer with a Codex-native backend. The current runtime is still Claude-centered; the Codex migration work is specified in [docs/codex-session-technical-spec.md](docs/codex-session-technical-spec.md).
+This repository currently ships the working ProjectExo bot codebase plus a concrete migration plan to replace the Anthropic-specific execution layer with a Codex-native backend. The current runtime is still Claude-centered; the Codex migration work is specified in [docs/codex-session-technical-spec.md](docs/codex-session-technical-spec.md), and the follow-on runtime transport plan for ACP is in [docs/acp-migration-plan.md](docs/acp-migration-plan.md).
 
 ## What You Get
 
@@ -43,4 +43,4 @@ Fill `.env` with your Discord bot token, guild ID, and backend credentials befor
 - `main`: sanitized baseline of the working bot
 - Feature PRs: README/install polish and the Codex migration technical spec
 
-If you want the actual Codex backend implementation, start with the spec in `docs/` and replace `layers/claude_exec.py` with a `codex_exec.py` session runner instead of extending the existing Anthropic-specific layer further.
+If you want the actual Codex backend implementation, start with the specs in `docs/` and replace `layers/claude_exec.py` with a runtime abstraction plus a `codex_exec.py` / ACP-backed session runner instead of extending the existing Anthropic-specific layer further.
