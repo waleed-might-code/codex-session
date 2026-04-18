@@ -4,6 +4,8 @@
 
 Turn the current Discord bot into a Codex-native session manager that runs continuously on a single Ubuntu VPS and is friendly to small-server users who want SSH, GitHub, and Cloudflare control without AWS-style orchestration.
 
+This document covers the product direction. The runtime-transport follow-on plan for moving from CLI JSON parsing to ACP lives in [docs/acp-migration-plan.md](acp-migration-plan.md).
+
 ## Current State
 
 - `layers/claude_exec.py` and `layers/test_loop.py` are tightly coupled to Anthropic APIs.
@@ -80,3 +82,4 @@ Avoid Lambda, queues, and managed workflow dependencies in phase 1.
 3. Migrate Discord commands from `/claude` to `/codex`.
 4. Add rich Discord event reporting for tool calls, diffs, deploys, and PRs.
 5. Harden multi-session supervision, resume, and failure recovery.
+6. Replace the temporary CLI event-stream boundary with ACP after runtime abstraction and Discord integration coverage are in place.
